@@ -1,0 +1,391 @@
+#!/bin/bash
+# ==============================================================================
+# 051N7-MAIL: PRODUCTION DECENTRALIZED P2P MULTI-CAST CONSOLE (v4.0 BUILD)
+# ==============================================================================
+
+# Core Application File System Mapping
+YGG_DIR="$HOME/.051n7_ygg"
+YGG_CONF="$YGG_DIR/yggdrasil.conf"
+LOCAL_INBOX="$HOME/.051n7_mail/inbox"
+LOCAL_ARCHIVE="$HOME/.051n7_mail/archive"
+OUTBOUND_SPOOL="$HOME/.051n7_mail/spool"
+SESSION_NAME="051n7_secure_station"
+
+export TERM=xterm-256color
+
+# ------------------------------------------------------------------------------
+# SUBSCRIPT A: THE TUNLESS RECEIVER & PROGRAMMATIC INTERCEPTOR LOOP
+# ------------------------------------------------------------------------------
+run_receiver() {
+    clear
+    IP_FILE="$HOME/.051n7_mail/my_ygg_ip"
+    MY_ASSIGNED_IP=$(cat "$IP_FILE" 2>/dev/null | tr -d ' 
+')
+
+    check_vpn_status() {
+        if [ -n "$MY_ASSIGNED_IP" ] && (ping -6 -c 1 -W 1 "$MY_ASSIGNED_IP" >/dev/null 2>&1 || ping6 -c 1 -w 1 "$MY_ASSIGNED_IP" >/dev/null 2>&1); then
+            echo "$MY_ASSIGNED_IP [ONLINE]"
+        else
+            echo "${MY_ASSIGNED_IP:-[No IP Set]} [OFFLINE - VPN Disabled]"
+        fi
+    }
+
+    LAST_STATUS=$(check_vpn_status)
+
+    echo "[*] 051n7 Secure Inbound Yggdrasil Monitor Active."
+    echo "[*] YOUR TARGET ADDR: $LAST_STATUS"
+    echo "[*] Listening on port 8525 for encrypted payloads..."
+    echo "----------------------------------------------------------------"
+
+    python3 -c '
+import socket, sys, os, time, random
+inbox = sys.argv[1]
+s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("::", 8525))
+s.listen(5)
+while True:
+    conn, addr = s.accept()
+    data = bytearray()
+    while True:
+        chunk = conn.recv(4096)
+        if not chunk: break
+        data.extend(chunk)
+    conn.close()
+    if data:
+        fname = os.path.join(inbox, f"recv_{int(time.time())}_{random.randint(1000,9999)}.gpg")
+        with open(fname, "wb") as f:
+            f.write(data)
+' "$LOCAL_INBOX" >/dev/null 2>&1 &
+    PYTHON_LISTEN_PID=$!
+
+    trap 'kill $PYTHON_LISTEN_PID 2>/dev/null; exit 0' SIGINT SIGTERM
+
+    while true; do
+        CURRENT_STATUS=$(check_vpn_status)
+        if [ "$CURRENT_STATUS" != "$LAST_STATUS" ]; then
+            LAST_STATUS="$CURRENT_STATUS"
+            echo -e "
+[*] STATUS CHANGED: $CURRENT_STATUS"
+            echo "----------------------------------------------------------------"
+        fi
+
+        FILE=$(find "$LOCAL_INBOX" -maxdepth 1 -name "*.gpg" 2>/dev/null | head -n 1)
+        if [ ! -z "$FILE" ]; then
+            echo -e "
+=============================================="
+            echo -e "[+] INCOMING ENCRYPTED EMAIL PACKET DETECTED"
+            echo -e "==============================================
+"
+            TEMP_DECRYPT=$(mktemp)
+
+            gpg --batch --quiet --decrypt "$FILE" > "$TEMP_DECRYPT" 2>/dev/null
+            if [ $? -eq 0 ] && [ -s "$TEMP_DECRYPT" ]; then
+                echo -e "--- LOG DATA ACCESSED ---
+"
+                cat "$TEMP_DECRYPT"
+                echo -e "
+=============================================="
+                rm -f "$FILE"
+
+                while true; do
+                    read -p "Archive message to offline storage or Delete permanently? (archive/delete): " choice
+                    case "$choice" in
+                        [Aa]* )
+                            TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+                            mv "$TEMP_DECRYPT" "$LOCAL_ARCHIVE/mail_${TIMESTAMP}.eml"
+                            echo "[*] Securely recorded to offline device archive."
+                            break
+                            ;;
+                        [Dd]* )
+                            rm -f "$TEMP_DECRYPT"
+                            echo "[+] Payload permanently expunged from disk memory."
+                            break
+                            ;;
+                        * ) echo "Please type archive or delete.";;
+                    esac
+                done
+            else
+                rm -f "$FILE" "$TEMP_DECRYPT"
+                echo "[!] Dropped Packet: Payload unreadable or cryptographic verification denied."
+            fi
+        fi
+        sleep 2
+    done
+}
+
+# ------------------------------------------------------------------------------
+# SUBSCRIPT B: THE ASYNCHRONOUS MULTI-CAST MAIL COMPOSER
+# ------------------------------------------------------------------------------
+run_composer() {
+    CONTACTS_FILE="$HOME/.051n7_mail/contacts.conf"
+    touch "$CONTACTS_FILE"
+
+    lookup_contact() {
+        grep -i "^$1|" "$CONTACTS_FILE" 2>/dev/null | head -n 1
+    }
+
+    save_contact() {
+        local handle="$1"
+        local gpg_id="$2"
+        local ygg_ip="$3"
+        if [[ "$handle" != *@051n7.usr ]] && [[ "$handle" != *@051n7.grp ]]; then
+            handle="${handle}@051n7.usr"
+        fi
+        sed -i "/^${handle}|/d" "$CONTACTS_FILE" 2>/dev/null
+        echo "${handle}|${gpg_id}|${ygg_ip}" >> "$CONTACTS_FILE"
+        echo "[+] Contact saved: $handle -> GPG: $gpg_id | IPv6: $ygg_ip"
+    }
+
+    while true; do
+        clear
+        echo "=============================================="
+        echo "       051N7 YGGDRASIL MULTI-CAST COMPOSER    "
+        echo "=============================================="
+        echo " (Type 'CANCEL' to reset | Type 'PREV' to go back 1 step)"
+        echo " (Type 'CONTACTS' at 'TO' prompt to view address book)"
+        echo "----------------------------------------------"
+
+        mail_from="ghost@051n7.usr"
+        mail_to=""
+        ygg_to=""
+        mail_cc=""
+        mail_bcc=""
+        mail_subject=""
+        mail_to_input=""
+        declare -a body_lines=()
+
+        step=0
+        while [ $step -le 5 ]; do
+            case $step in
+                0)
+                    read -p "FROM Address [Default: ghost@051n7.usr]: " val
+                    [ "$val" = "CANCEL" ] && continue 2
+                    mail_from=${val:-"ghost@051n7.usr"}
+                    step=1
+                    ;;
+                1)
+                    read -p "TO Handle/GPG ID [e.g. alice@051n7.usr]: " val
+                    if [ "$val" = "CANCEL" ]; then continue 2; fi
+                    if [ "$val" = "PREV" ]; then printf "[1A[2K[1A[2K"; step=0; continue; fi
+                    if [ "$val" = "CONTACTS" ]; then
+                        echo -e "
+=== LOCAL CONTACTS ADDRESS BOOK ==="
+                        if [ -s "$CONTACTS_FILE" ]; then
+                            cat "$CONTACTS_FILE" | awk -F'|' '{printf " %-22s -> GPG: %-25s IPv6: %s
+", $1, $2, $3}'
+                        else
+                            echo " [No saved contacts yet]"
+                        fi
+                        echo "===================================="
+                        read -p "Press [Enter] to resume..." dummy
+                        continue
+                    fi
+
+                    mail_to_input="$val"
+                    MATCHING_CONTACT=$(lookup_contact "$val")
+                    if [ -n "$MATCHING_CONTACT" ]; then
+                        mail_to=$(echo "$MATCHING_CONTACT" | cut -d'|' -f2)
+                        ygg_to=$(echo "$MATCHING_CONTACT" | cut -d'|' -f3)
+                        echo "[+] Resolved Contact [$val]:"
+                        echo "    GPG Key  : $mail_to"
+                        echo "    Target IP: $ygg_to"
+                        step=3
+                    else
+                        mail_to="$val"
+                        step=2
+                    fi
+                    ;;
+                2)
+                    read -p "TO Destination Yggdrasil IPv6 Address  : " val
+                    if [ "$val" = "CANCEL" ]; then continue 2; fi
+                    if [ "$val" = "PREV" ]; then printf "[1A[2K[1A[2K"; step=1; continue; fi
+                    ygg_to="$val"
+
+                    if [ -n "$mail_to" ] && [ -n "$ygg_to" ]; then
+                        read -p "[?] Save recipient to local contacts? (y/N): " save_choice
+                        case "$save_choice" in
+                            [Yy]* )
+                                default_handle=$(echo "$mail_to" | cut -d'@' -f1)"@051n7.usr"
+                                read -p "    Handle Name [Default: $default_handle]: " custom_handle
+                                custom_handle=${custom_handle:-"$default_handle"}
+                                save_contact "$custom_handle" "$mail_to" "$ygg_to"
+                                ;;
+                        esac
+                    fi
+                    step=3
+                    ;;
+                3)
+                    read -p "CC GPG Identities (Space-separated)    : " val
+                    if [ "$val" = "CANCEL" ]; then continue 2; fi
+                    if [ "$val" = "PREV" ]; then
+                        printf "[1A[2K[1A[2K"
+                        if lookup_contact "$mail_to_input" >/dev/null 2>&1; then step=1; else step=2; fi
+                        continue
+                    fi
+                    mail_cc="$val"
+                    step=4
+                    ;;
+                4)
+                    read -p "BCC GPG Identities (Space-separated)   : " val
+                    if [ "$val" = "CANCEL" ]; then continue 2; fi
+                    if [ "$val" = "PREV" ]; then printf "[1A[2K[1A[2K"; step=3; continue; fi
+                    mail_bcc="$val"
+                    step=5
+                    ;;
+                5)
+                    read -p "Subject Line                           : " val
+                    if [ "$val" = "CANCEL" ]; then continue 2; fi
+                    if [ "$val" = "PREV" ]; then printf "[1A[2K[1A[2K"; step=4; continue; fi
+                    mail_subject="$val"
+                    step=6
+                    ;;
+            esac
+        done
+
+        if [ -z "$mail_to" ] || [ -z "$ygg_to" ]; then
+            echo "[!] Error: You must declare both a target GPG signature and a valid destination IP."
+            sleep 2
+            continue
+        fi
+
+        echo -e "
+Enter email text body:"
+        echo "  - Type 'END' on a clean line to dispatch"
+        echo "  - Type 'PREV' on a clean line to delete previous line"
+        echo "  - Type 'CANCEL' on a clean line to discard composition"
+        echo "----------------------------------------------------------------"
+
+        while true; do
+            read -r -p "> " line
+
+            if [ "$line" = "END" ]; then
+                break
+            elif [ "$line" = "CANCEL" ]; then
+                echo "[!] Composition cancelled. Resetting form..."
+                sleep 1.5
+                continue 2
+            elif [ "$line" = "PREV" ]; then
+                if [ ${#body_lines[@]} -gt 0 ]; then
+                    unset 'body_lines[${#body_lines[@]}-1]'
+                    body_lines=("${body_lines[@]}")
+                    printf "[1A[2K[1A[2K"
+                else
+                    printf "[1A[2K"
+                    step=5
+                    break
+                fi
+                continue
+            fi
+
+            body_lines+=("$line")
+        done
+
+        if [ $step -eq 5 ]; then
+            continue
+        fi
+
+        message_body=""
+        for l in "${body_lines[@]}"; do
+            message_body+="$l"$'
+'
+        done
+
+        echo "----------------------------------------------------------------"
+        echo "[*] Bundling asynchronous multi-cast cryptographic matrix..."
+
+        ALL_RECIPIENTS="$mail_to $mail_cc $mail_bcc"
+
+        for recipient in $ALL_RECIPIENTS; do
+            [ -z "$recipient" ] && continue
+
+            TEMP_RAW=$(mktemp)
+            printf "Date: $(date)
+From: <$mail_from>
+To: <$mail_to>
+" > "$TEMP_RAW"
+            [ ! -z "$mail_cc" ] && printf "Cc: $mail_cc
+" >> "$TEMP_RAW"
+
+            if echo "$mail_bcc" | grep -q "$recipient"; then
+                printf "X-Routing-Context: Anonymous Private Receipt (BCC Layer)
+" >> "$TEMP_RAW"
+            fi
+            printf "Subject: $mail_subject
+
+$message_body" >> "$TEMP_RAW"
+
+            TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+            RAND_HEX=$(cat /dev/urandom | tr -dc 'a-f0-9' | fold -w 8 | head -n 1)
+            SPOOL_FILE="$OUTBOUND_SPOOL/send_${TIMESTAMP}_${RAND_HEX}.gpg"
+
+            gpg --batch --yes --armor --recipient "$recipient" --output "$SPOOL_FILE" --encrypt "$TEMP_RAW" 2>/dev/null
+            rm -f "$TEMP_RAW"
+
+            if [ -f "$SPOOL_FILE" ]; then
+                if [ "$recipient" == "$mail_to" ]; then
+                    echo "[*] Transmitting envelope to core target address [$ygg_to]..."
+                    nc -6 -w 5 "$ygg_to" 8525 < "$SPOOL_FILE" >/dev/null 2>&1
+                    if [ $? -eq 0 ]; then
+                        echo "[+] Core broadcast success."
+                        rm -f "$SPOOL_FILE"
+                    else
+                        echo "[!] Host unreachable. Packet queued in spool for background processing."
+                    fi
+                else
+                    echo "[+] Ancillary node packet queued safely to outbound spool pipeline."
+                fi
+            fi
+        done
+        echo "=============================================="
+        read -p "Press [Enter] to recycle mail composer panel..." dummy
+    done
+}
+
+# ------------------------------------------------------------------------------
+# CORE MASTER SYSTEM WORKSPACE RUNTIME CONTROLLER
+# ------------------------------------------------------------------------------
+if [ "$1" == "--internal-monitor" ]; then
+    run_receiver
+    exit 0
+elif [ "$1" == "--internal-composer" ]; then
+    run_composer
+    exit 0
+fi
+
+mkdir -p "$YGG_DIR" "$LOCAL_INBOX" "$LOCAL_ARCHIVE" "$OUTBOUND_SPOOL"
+IP_FILE="$HOME/.051n7_mail/my_ygg_ip"
+if [ ! -f "$IP_FILE" ] || [ ! -s "$IP_FILE" ]; then
+    echo "=============================================="
+    echo "       051N7 YGGDRASIL STATION SETUP          "
+    echo "=============================================="
+    read -p "[?] Enter YOUR Yggdrasil IPv6 Address (from VPN App): " user_ygg_ip
+    echo "$user_ygg_ip" > "$IP_FILE"
+fi
+IP_FILE="$HOME/.051n7_mail/my_ygg_ip"
+if [ ! -f "$IP_FILE" ] || [ ! -s "$IP_FILE" ]; then
+    echo "=============================================="
+    echo "       051N7 YGGDRASIL STATION SETUP          "
+    echo "=============================================="
+    read -p "[?] Enter YOUR Yggdrasil IPv6 Address (from VPN App): " user_ygg_ip
+    echo "$user_ygg_ip" > "$IP_FILE"
+fi
+gpg-connect-agent /bye >/dev/null 2>&1
+
+if [ ! -f "$YGG_CONF" ]; then
+    echo "[*] Generating standard cryptographic device identity keypair..."
+    yggdrasil -genconf > "$YGG_CONF" 2>/dev/null
+fi
+
+if ! pgrep -x "yggdrasil" > /dev/null; then
+    echo "[*] Initializing background network packet overlay router..."
+    sudo yggdrasil -useconffile "$YGG_CONF" > /dev/null 2>&1 &
+    sleep 2
+fi
+
+tmux kill-session -t "$SESSION_NAME" 2>/dev/null
+
+tmux new-session -d -s "$SESSION_NAME" -n "MailStation" "051n7-mail --internal-monitor"
+tmux split-window -v -t "$SESSION_NAME" "051n7-mail --internal-composer"
+tmux resize-pane -t "$SESSION_NAME":0.0 -y 55%
+tmux attach-session -t "$SESSION_NAME"

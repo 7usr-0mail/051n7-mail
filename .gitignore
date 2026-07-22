@@ -1,0 +1,15 @@
+*.deb
+*-pkg/
+/tmp/
+ping_target
+my_ygg_ip
+contacts.conf
+*.conf
+*.gpg
+*.key
+*.asc
+*.eml
+__pycache__/
+*.pyc
+*.swp
+.DS_Store
