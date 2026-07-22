@@ -1,15 +1,14 @@
 #!/bin/bash
 # ==============================================================================
-# 051N7-MAIL: PRODUCTION DECENTRALIZED P2P MULTI-CAST CONSOLE (v4.0 BUILD)
+# 051N7-MAIL: PRODUCTION DECENTRALIZED P2P MULTI-CAST CONSOLE (v0.0.5 BUILD)
 # ==============================================================================
 
-# Core Application File System Mapping
 YGG_DIR="$HOME/.051n7_ygg"
 YGG_CONF="$YGG_DIR/yggdrasil.conf"
 LOCAL_INBOX="$HOME/.051n7_mail/inbox"
 LOCAL_ARCHIVE="$HOME/.051n7_mail/archive"
 OUTBOUND_SPOOL="$HOME/.051n7_mail/spool"
-CONTACTS_FILE="$HOME/.051n7_mail/contacts.conf"
+CONTACTS_DIR="$HOME/.051n7_mail/contacts"
 IP_FILE="$HOME/.051n7_mail/my_ygg_ip"
 SESSION_NAME="051n7_secure_station"
 
@@ -38,7 +37,6 @@ run_receiver() {
     echo "[*] Outbound Spool Auto-Retry Queue Active."
     echo "----------------------------------------------------------------"
 
-    # Background inbound Python socket server
     python3 -c '
 import socket, sys, os, time, random
 inbox = sys.argv[1]
@@ -61,7 +59,6 @@ while True:
 ' "$LOCAL_INBOX" >/dev/null 2>&1 &
     PYTHON_LISTEN_PID=$!
 
-    # Background outbound spool queue worker (retries every 10 seconds)
     run_spool_retry() {
         while true; do
             for meta_file in "$OUTBOUND_SPOOL"/*.meta; do
@@ -138,33 +135,83 @@ while True:
 # SUBSCRIPT B: THE ASYNCHRONOUS MULTI-CAST MAIL COMPOSER
 # ------------------------------------------------------------------------------
 run_composer() {
-    touch "$CONTACTS_FILE"
+    mkdir -p "$CONTACTS_DIR"
 
-    lookup_contact() {
-        grep -i "^$1|" "$CONTACTS_FILE" 2>/dev/null | head -n 1
-    }
-
-    save_contact() {
+    save_individual_contact() {
         local handle="$1"
         local gpg_id="$2"
         local ygg_ip="$3"
-        if [[ "$handle" != *@051n7.usr ]] && [[ "$handle" != *@051n7.grp ]]; then
-            handle="${handle}@051n7.usr"
+        local parent_dir="${4:-$CONTACTS_DIR}"
+
+        [[ "$handle" != *@051n7.usr ]] && handle="${handle}@051n7.usr"
+        mkdir -p "$parent_dir"
+
+        cat << CEOF > "$parent_dir/$handle"
+GPG_ID=$gpg_id
+YGG_IP=$ygg_ip
+CEOF
+        echo "[+] Saved contact file: $parent_dir/$handle"
+    }
+
+    save_group_contact() {
+        local grp_handle="$1"
+        local member_handle="$2"
+        local gpg_id="$3"
+        local ygg_ip="$4"
+
+        [[ "$grp_handle" != *@051n7.grp ]] && grp_handle="${grp_handle}@051n7.grp"
+        local grp_dir="$CONTACTS_DIR/$grp_handle"
+
+        save_individual_contact "$member_handle" "$gpg_id" "$ygg_ip" "$grp_dir"
+    }
+
+    lookup_contact() {
+        local query="$1"
+        GPG_KEYS=()
+        YGG_IPS=()
+
+        if [ -f "$CONTACTS_DIR/$query" ]; then
+            unset GPG_ID YGG_IP
+            source "$CONTACTS_DIR/$query"
+            GPG_KEYS+=("$GPG_ID")
+            YGG_IPS+=("$YGG_IP")
+            return 0
         fi
-        sed -i "/^${handle}|/d" "$CONTACTS_FILE" 2>/dev/null
-        echo "${handle}|${gpg_id}|${ygg_ip}" >> "$CONTACTS_FILE"
-        echo "[+] Contact saved: $handle -> GPG: $gpg_id | IPv6: $ygg_ip"
+
+        if [ -d "$CONTACTS_DIR/$query" ]; then
+            for mf in "$CONTACTS_DIR/$query"/*.usr; do
+                [ -f "$mf" ] || continue
+                unset GPG_ID YGG_IP
+                source "$mf"
+                [ -n "$GPG_ID" ] && GPG_KEYS+=("$GPG_ID")
+                [ -n "$YGG_IP" ] && YGG_IPS+=("$YGG_IP")
+            done
+            [ ${#GPG_KEYS[@]} -gt 0 ] && return 0
+        fi
+
+        if [ -f "$CONTACTS_DIR/${query}@051n7.usr" ]; then
+            unset GPG_ID YGG_IP
+            source "$CONTACTS_DIR/${query}@051n7.usr"
+            GPG_KEYS+=("$GPG_ID")
+            YGG_IPS+=("$YGG_IP")
+            return 0
+        fi
+
+        if [ -d "$CONTACTS_DIR/${query}@051n7.grp" ]; then
+            for mf in "$CONTACTS_DIR/${query}@051n7.grp"/*.usr; do
+                [ -f "$mf" ] || continue
+                unset GPG_ID YGG_IP
+                source "$mf"
+                [ -n "$GPG_ID" ] && GPG_KEYS+=("$GPG_ID")
+                [ -n "$YGG_IP" ] && YGG_IPS+=("$YGG_IP")
+            done
+            [ ${#GPG_KEYS[@]} -gt 0 ] && return 0
+        fi
+
+        return 1
     }
 
     while true; do
-        clear
-        echo "=============================================="
-        echo "       051N7 YGGDRASIL MULTI-CAST COMPOSER    "
-        echo "=============================================="
-        echo " (Type 'CANCEL' to reset | Type 'PREV' to go back 1 step)"
-        echo " (Type 'CONTACTS' or 'QUEUE' at 'TO' prompt)"
-        echo "----------------------------------------------"
-
         mail_from="ghost@051n7.usr"
         mail_to=""
         ygg_to=""
@@ -172,35 +219,91 @@ run_composer() {
         mail_bcc=""
         mail_subject=""
         mail_to_input=""
+        GPG_KEYS=()
+        YGG_IPS=()
         declare -a body_lines=()
 
+        draw_header() {
+            clear
+            echo "=============================================="
+            echo "       051N7 YGGDRASIL MULTI-CAST COMPOSER    "
+            echo "=============================================="
+            echo " (Type 'CANCEL' to reset | Type 'PREV' to go back)"
+            echo " (Type 'CONTACTS' or 'QUEUE' at 'TO' prompt)"
+            echo "----------------------------------------------"
+            [ $step -gt 0 ] && echo " FROM    : $mail_from"
+            [ $step -gt 1 ] && echo " TO      : ${mail_to_input:-${GPG_KEYS[0]}}"
+            [ $step -gt 2 ] && echo " TARGET  : ${YGG_IPS[0]}"
+            [ $step -gt 3 ] && [ -n "$mail_cc" ] && echo " CC      : $mail_cc"
+            [ $step -gt 4 ] && [ -n "$mail_bcc" ] && echo " BCC     : $mail_bcc"
+            [ $step -gt 5 ] && echo " SUBJECT : $mail_subject"
+            [ $step -gt 0 ] && echo "----------------------------------------------"
+        }
+
         step=0
+        resolved_by_contact=0
+
         while [ $step -le 5 ]; do
+            draw_header
             case $step in
                 0)
                     read -p "FROM Address [Default: ghost@051n7.usr]: " val
-                    [ "$val" = "CANCEL" ] && continue 2
+                    cmd=$(echo "$val" | tr '[:lower:]' '[:upper:]')
+                    [ "$cmd" = "CANCEL" ] && continue 2
+                    if [ "$cmd" = "PREV" ]; then continue; fi
+                    
                     mail_from=${val:-"ghost@051n7.usr"}
+                    if [ "$mail_from" != "ghost@051n7.usr" ] && [[ "$mail_from" != *@051n7.usr ]] && [[ "$mail_from" != *@051n7.grp ]]; then
+                        mail_from="${mail_from}@051n7.usr"
+                    fi
                     step=1
                     ;;
                 1)
                     read -p "TO Handle/GPG ID [e.g. alice@051n7.usr]: " val
-                    if [ "$val" = "CANCEL" ]; then continue 2; fi
-                    if [ "$val" = "PREV" ]; then printf "\033[1A\033[2K\033[1A\033[2K"; step=0; continue; fi
-                    if [ "$val" = "CONTACTS" ]; then
-                        echo -e "\n=== LOCAL CONTACTS ADDRESS BOOK ==="
-                        if [ -s "$CONTACTS_FILE" ]; then
-                            cat "$CONTACTS_FILE" | awk -F'|' '{printf " %-22s -> GPG: %-25s IPv6: %s\n", $1, $2, $3}'
+                    cmd=$(echo "$val" | tr '[:lower:]' '[:upper:]')
+                    [ "$cmd" = "CANCEL" ] && continue 2
+                    if [ "$cmd" = "PREV" ]; then step=0; continue; fi
+                    if [ "$cmd" = "CONTACTS" ]; then
+                        echo -e "
+=== LOCAL CONTACTS DIRECTORY ($CONTACTS_DIR) ==="
+                        shopt -s nullglob
+                        usr_files=("$CONTACTS_DIR"/*.usr)
+                        grp_dirs=("$CONTACTS_DIR"/*.grp)
+                        echo "[INDIVIDUAL USERS]"
+                        if [ ${#usr_files[@]} -gt 0 ]; then
+                            for uf in "${usr_files[@]}"; do
+                                unset GPG_ID YGG_IP
+                                source "$uf" 2>/dev/null
+                                printf "  - %-22s -> GPG: %-22s IPv6: %s
+" "$(basename "$uf")" "$GPG_ID" "$YGG_IP"
+                            done
                         else
-                            echo " [No saved contacts yet]"
+                            echo "  (None saved)"
                         fi
-                        echo "===================================="
+                        echo -e "
+[GROUPS (.grp Directory)]"
+                        if [ ${#grp_dirs[@]} -gt 0 ]; then
+                            for gd in "${grp_dirs[@]}"; do
+                                mfiles=("$gd"/*.usr)
+                                echo "  - $(basename "$gd")/ (${#mfiles[@]} members):"
+                                for mf in "${mfiles[@]}"; do
+                                    unset GPG_ID YGG_IP
+                                    source "$mf" 2>/dev/null
+                                    printf "      * %-20s -> GPG: %-20s IPv6: %s
+" "$(basename "$mf")" "$GPG_ID" "$YGG_IP"
+                                done
+                            done
+                        else
+                            echo "  (None saved)"
+                        fi
+                        echo "========================================================"
                         read -p "Press [Enter] to resume..." dummy
                         continue
                     fi
 
-                    if [ "$val" = "QUEUE" ]; then
-                        echo -e "\n=== OUTBOUND PENDING SPOOL QUEUE ==="
+                    if [ "$cmd" = "QUEUE" ]; then
+                        echo -e "
+=== OUTBOUND PENDING SPOOL QUEUE ==="
                         found_queue=0
                         for mf in "$OUTBOUND_SPOOL"/*.meta; do
                             if [ -f "$mf" ]; then
@@ -218,74 +321,86 @@ run_composer() {
                         continue
                     fi
 
+                    if [[ "$val" != *@* ]] && [[ "$val" != *@051n7.usr ]] && [[ "$val" != *@051n7.grp ]]; then
+                        val="${val}@051n7.usr"
+                    fi
+
                     mail_to_input="$val"
-                    MATCHING_CONTACT=$(lookup_contact "$val")
-                    if [ -n "$MATCHING_CONTACT" ]; then
-                        mail_to=$(echo "$MATCHING_CONTACT" | cut -d'|' -f2)
-                        ygg_to=$(echo "$MATCHING_CONTACT" | cut -d'|' -f3)
-                        echo "[+] Resolved Contact [$val]:"
-                        echo "    GPG Key  : $mail_to"
-                        echo "    Target IP: $ygg_to"
+                    if lookup_contact "$val"; then
+                        resolved_by_contact=1
                         step=3
                     else
+                        resolved_by_contact=0
                         mail_to="$val"
+                        GPG_KEYS=("$mail_to")
                         step=2
                     fi
                     ;;
                 2)
                     read -p "TO Destination Yggdrasil IPv6 Address  : " val
-                    if [ "$val" = "CANCEL" ]; then continue 2; fi
-                    if [ "$val" = "PREV" ]; then printf "\033[1A\033[2K\033[1A\033[2K"; step=1; continue; fi
-                    ygg_to="$val"
+                    cmd=$(echo "$val" | tr '[:lower:]' '[:upper:]')
+                    [ "$cmd" = "CANCEL" ] && continue 2
+                    if [ "$cmd" = "PREV" ]; then step=1; continue; fi
+                    YGG_IPS=("$val")
 
-                    if [ -n "$mail_to" ] && [ -n "$ygg_to" ]; then
-                        read -p "[?] Save recipient to local contacts? (y/N): " save_choice
+                    if [ -n "${GPG_KEYS[0]}" ] && [ -n "${YGG_IPS[0]}" ]; then
+                        read -p "[?] Save recipient to local contacts directory? (y/N): " save_choice
                         case "$save_choice" in
                             [Yy]* )
-                                default_handle=$(echo "$mail_to" | cut -d'@' -f1)"@051n7.usr"
-                                read -p "    Handle Name [Default: $default_handle]: " custom_handle
-                                custom_handle=${custom_handle:-"$default_handle"}
-                                save_contact "$custom_handle" "$mail_to" "$ygg_to"
+                                read -p "    Save as (1) Individual user file, (2) Group member folder? [1/2]: " type_choice
+                                if [ "$type_choice" = "2" ]; then
+                                    read -p "    Group Folder Name [e.g. squad@051n7.grp]: " grp_name
+                                    read -p "    User File Name [e.g. alice@051n7.usr]: " mbr_name
+                                    save_group_contact "$grp_name" "$mbr_name" "${GPG_KEYS[0]}" "${YGG_IPS[0]}"
+                                else
+                                    default_handle=$(echo "${GPG_KEYS[0]}" | cut -d'@' -f1)"@051n7.usr"
+                                    read -p "    User File Name [Default: $default_handle]: " custom_handle
+                                    custom_handle=${custom_handle:-"$default_handle"}
+                                    save_individual_contact "$custom_handle" "${GPG_KEYS[0]}" "${YGG_IPS[0]}"
+                                fi
                                 ;;
                         esac
                     fi
                     step=3
                     ;;
                 3)
-                    read -p "CC GPG Identities (Space-separated)    : " val
-                    if [ "$val" = "CANCEL" ]; then continue 2; fi
-                    if [ "$val" = "PREV" ]; then
-                        printf "\033[1A\033[2K\033[1A\033[2K"
-                        if lookup_contact "$mail_to_input" >/dev/null 2>&1; then step=1; else step=2; fi
+                    read -p "CC GPG Identities (Space-separated) [Optional, Enter to skip]: " val
+                    cmd=$(echo "$val" | tr '[:lower:]' '[:upper:]')
+                    [ "$cmd" = "CANCEL" ] && continue 2
+                    if [ "$cmd" = "PREV" ]; then
+                        if [ $resolved_by_contact -eq 1 ]; then step=1; else step=2; fi
                         continue
                     fi
                     mail_cc="$val"
                     step=4
                     ;;
                 4)
-                    read -p "BCC GPG Identities (Space-separated)   : " val
-                    if [ "$val" = "CANCEL" ]; then continue 2; fi
-                    if [ "$val" = "PREV" ]; then printf "\033[1A\033[2K\033[1A\033[2K"; step=3; continue; fi
+                    read -p "BCC GPG Identities (Space-separated) [Optional, Enter to skip]: " val
+                    cmd=$(echo "$val" | tr '[:lower:]' '[:upper:]')
+                    [ "$cmd" = "CANCEL" ] && continue 2
+                    if [ "$cmd" = "PREV" ]; then step=3; continue; fi
                     mail_bcc="$val"
                     step=5
                     ;;
                 5)
                     read -p "Subject Line                           : " val
-                    if [ "$val" = "CANCEL" ]; then continue 2; fi
-                    if [ "$val" = "PREV" ]; then printf "\033[1A\033[2K\033[1A\033[2K"; step=4; continue; fi
+                    cmd=$(echo "$val" | tr '[:lower:]' '[:upper:]')
+                    [ "$cmd" = "CANCEL" ] && continue 2
+                    if [ "$cmd" = "PREV" ]; then step=4; continue; fi
                     mail_subject="$val"
                     step=6
                     ;;
             esac
         done
 
-        if [ -z "$mail_to" ] || [ -z "$ygg_to" ]; then
+        if [ ${#GPG_KEYS[@]} -eq 0 ] || [ ${#YGG_IPS[@]} -eq 0 ]; then
             echo "[!] Error: You must declare both a target GPG signature and a valid destination IP."
             sleep 2
             continue
         fi
 
-        echo -e "\nEnter email text body:"
+        draw_header
+        echo "Enter email text body:"
         echo "  - Type 'END' on a clean line to dispatch"
         echo "  - Type 'PREV' on a clean line to erase previous line"
         echo "  - Type 'CANCEL' on a clean line to discard composition"
@@ -293,20 +408,28 @@ run_composer() {
 
         while true; do
             read -r -p "> " line
+            line_cmd=$(echo "$line" | tr '[:lower:]' '[:upper:]')
 
-            if [ "$line" = "END" ]; then
+            if [ "$line_cmd" = "END" ]; then
                 break
-            elif [ "$line" = "CANCEL" ]; then
+            elif [ "$line_cmd" = "CANCEL" ]; then
                 echo "[!] Composition cancelled. Resetting form..."
                 sleep 1.5
                 continue 2
-            elif [ "$line" = "PREV" ]; then
+            elif [ "$line_cmd" = "PREV" ]; then
                 if [ ${#body_lines[@]} -gt 0 ]; then
                     unset 'body_lines[${#body_lines[@]}-1]'
                     body_lines=("${body_lines[@]}")
-                    printf "\033[1A\033[2K\033[1A\033[2K"
+                    draw_header
+                    echo "Enter email text body:"
+                    echo "  - Type 'END' on a clean line to dispatch"
+                    echo "  - Type 'PREV' on a clean line to erase previous line"
+                    echo "  - Type 'CANCEL' on a clean line to discard composition"
+                    echo "----------------------------------------------------------------"
+                    for bl in "${body_lines[@]}"; do
+                        echo "> $bl"
+                    done
                 else
-                    printf "\033[1A\033[2K"
                     step=5
                     break
                 fi
@@ -322,47 +445,46 @@ run_composer() {
 
         message_body=""
         for l in "${body_lines[@]}"; do
-            message_body+="$l"$'\n'
+            message_body+="$l"$'
+'
         done
 
         echo "----------------------------------------------------------------"
         echo "[*] Bundling asynchronous multi-cast cryptographic matrix..."
 
-        ALL_RECIPIENTS="$mail_to $mail_cc $mail_bcc"
-
-        for recipient in $ALL_RECIPIENTS; do
-            [ -z "$recipient" ] && continue
+        for idx in "${!GPG_KEYS[@]}"; do
+            recipient="${GPG_KEYS[$idx]}"
+            target_ip="${YGG_IPS[$idx]}"
+            [ -z "$recipient" ] || [ -z "$target_ip" ] && continue
 
             TEMP_RAW=$(mktemp)
-            printf "Date: $(date)\nFrom: <$mail_from>\nTo: <$mail_to>\n" > "$TEMP_RAW"
-            [ ! -z "$mail_cc" ] && printf "Cc: $mail_cc\n" >> "$TEMP_RAW"
+            printf "Date: $(date)
+From: <$mail_from>
+To: <${GPG_KEYS[0]}>
+" > "$TEMP_RAW"
+            [ ! -z "$mail_cc" ] && printf "Cc: $mail_cc
+" >> "$TEMP_RAW"
+            printf "Subject: $mail_subject
 
-            if echo "$mail_bcc" | grep -q "$recipient"; then
-                printf "X-Routing-Context: Anonymous Private Receipt (BCC Layer)\n" >> "$TEMP_RAW"
-            fi
-            printf "Subject: $mail_subject\n\n$message_body" >> "$TEMP_RAW"
+$message_body" >> "$TEMP_RAW"
 
             TIMESTAMP=$(date +%Y%m%d_%H%M%S)
             RAND_HEX=$(cat /dev/urandom | tr -dc 'a-f0-9' | fold -w 8 | head -n 1)
             SPOOL_FILE="$OUTBOUND_SPOOL/send_${TIMESTAMP}_${RAND_HEX}.gpg"
             SPOOL_META="$OUTBOUND_SPOOL/send_${TIMESTAMP}_${RAND_HEX}.meta"
-            echo "$ygg_to" > "$SPOOL_META"
+            echo "$target_ip" > "$SPOOL_META"
 
             gpg --batch --yes --armor --recipient "$recipient" --output "$SPOOL_FILE" --encrypt "$TEMP_RAW" 2>/dev/null
             rm -f "$TEMP_RAW"
 
             if [ -f "$SPOOL_FILE" ]; then
-                if [ "$recipient" == "$mail_to" ]; then
-                    echo "[*] Transmitting envelope to core target address [$ygg_to]..."
-                    nc -6 -w 5 "$ygg_to" 8525 < "$SPOOL_FILE" >/dev/null 2>&1
-                    if [ $? -eq 0 ]; then
-                        echo "[+] Core broadcast success."
-                        rm -f "$SPOOL_FILE" "$SPOOL_META"
-                    else
-                        echo "[!] Host unreachable. Packet queued in spool for background processing."
-                    fi
+                echo "[*] Transmitting envelope to target [$recipient] @ [$target_ip]..."
+                nc -6 -w 5 "$target_ip" 8525 < "$SPOOL_FILE" >/dev/null 2>&1
+                if [ $? -eq 0 ]; then
+                    echo "[+] Broadcast success to [$target_ip]."
+                    rm -f "$SPOOL_FILE" "$SPOOL_META"
                 else
-                    echo "[+] Ancillary node packet queued safely to outbound spool pipeline."
+                    echo "[!] Host unreachable. Packet queued in spool for background processing."
                 fi
             fi
         done
@@ -382,7 +504,7 @@ elif [ "$1" == "--internal-composer" ]; then
     exit 0
 fi
 
-mkdir -p "$YGG_DIR" "$LOCAL_INBOX" "$LOCAL_ARCHIVE" "$OUTBOUND_SPOOL"
+mkdir -p "$YGG_DIR" "$LOCAL_INBOX" "$LOCAL_ARCHIVE" "$OUTBOUND_SPOOL" "$CONTACTS_DIR"
 gpg-connect-agent /bye >/dev/null 2>&1
 
 if [ ! -f "$IP_FILE" ] || [ ! -s "$IP_FILE" ]; then
