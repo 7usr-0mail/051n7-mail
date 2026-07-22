@@ -9,18 +9,18 @@ YGG_CONF="$YGG_DIR/yggdrasil.conf"
 LOCAL_INBOX="$HOME/.051n7_mail/inbox"
 LOCAL_ARCHIVE="$HOME/.051n7_mail/archive"
 OUTBOUND_SPOOL="$HOME/.051n7_mail/spool"
+CONTACTS_FILE="$HOME/.051n7_mail/contacts.conf"
+IP_FILE="$HOME/.051n7_mail/my_ygg_ip"
 SESSION_NAME="051n7_secure_station"
 
 export TERM=xterm-256color
 
 # ------------------------------------------------------------------------------
-# SUBSCRIPT A: THE TUNLESS RECEIVER & PROGRAMMATIC INTERCEPTOR LOOP
+# SUBSCRIPT A: THE RECEIVER, VPN MONITOR & QUEUE RETRY WORKER
 # ------------------------------------------------------------------------------
 run_receiver() {
     clear
-    IP_FILE="$HOME/.051n7_mail/my_ygg_ip"
-    MY_ASSIGNED_IP=$(cat "$IP_FILE" 2>/dev/null | tr -d ' 
-')
+    MY_ASSIGNED_IP=$(cat "$IP_FILE" 2>/dev/null | tr -d ' \r\n')
 
     check_vpn_status() {
         if [ -n "$MY_ASSIGNED_IP" ] && (ping -6 -c 1 -W 1 "$MY_ASSIGNED_IP" >/dev/null 2>&1 || ping6 -c 1 -w 1 "$MY_ASSIGNED_IP" >/dev/null 2>&1); then
@@ -35,8 +35,10 @@ run_receiver() {
     echo "[*] 051n7 Secure Inbound Yggdrasil Monitor Active."
     echo "[*] YOUR TARGET ADDR: $LAST_STATUS"
     echo "[*] Listening on port 8525 for encrypted payloads..."
+    echo "[*] Outbound Spool Auto-Retry Queue Active."
     echo "----------------------------------------------------------------"
 
+    # Background inbound Python socket server
     python3 -c '
 import socket, sys, os, time, random
 inbox = sys.argv[1]
@@ -59,33 +61,51 @@ while True:
 ' "$LOCAL_INBOX" >/dev/null 2>&1 &
     PYTHON_LISTEN_PID=$!
 
-    trap 'kill $PYTHON_LISTEN_PID 2>/dev/null; exit 0' SIGINT SIGTERM
+    # Background outbound spool queue worker (retries every 10 seconds)
+    run_spool_retry() {
+        while true; do
+            for meta_file in "$OUTBOUND_SPOOL"/*.meta; do
+                [ -f "$meta_file" ] || continue
+                gpg_file="${meta_file%.meta}.gpg"
+                [ -f "$gpg_file" ] || { rm -f "$meta_file"; continue; }
+
+                target_ip=$(cat "$meta_file" 2>/dev/null | tr -d ' \r\n')
+                if [ -n "$target_ip" ]; then
+                    if nc -6 -w 3 "$target_ip" 8525 < "$gpg_file" >/dev/null 2>&1; then
+                        echo -e "\n[+] QUEUE RETRY SUCCESS: Auto-delivered pending packet to [$target_ip]"
+                        echo "----------------------------------------------------------------"
+                        rm -f "$gpg_file" "$meta_file"
+                    fi
+                fi
+            done
+            sleep 10
+        done
+    }
+    run_spool_retry >/dev/null 2>&1 &
+    SPOOL_WORKER_PID=$!
+
+    trap 'kill $PYTHON_LISTEN_PID $SPOOL_WORKER_PID 2>/dev/null; exit 0' SIGINT SIGTERM
 
     while true; do
         CURRENT_STATUS=$(check_vpn_status)
         if [ "$CURRENT_STATUS" != "$LAST_STATUS" ]; then
             LAST_STATUS="$CURRENT_STATUS"
-            echo -e "
-[*] STATUS CHANGED: $CURRENT_STATUS"
+            echo -e "\n[*] STATUS CHANGED: $CURRENT_STATUS"
             echo "----------------------------------------------------------------"
         fi
 
         FILE=$(find "$LOCAL_INBOX" -maxdepth 1 -name "*.gpg" 2>/dev/null | head -n 1)
         if [ ! -z "$FILE" ]; then
-            echo -e "
-=============================================="
+            echo -e "\n=============================================="
             echo -e "[+] INCOMING ENCRYPTED EMAIL PACKET DETECTED"
-            echo -e "==============================================
-"
+            echo -e "==============================================\n"
             TEMP_DECRYPT=$(mktemp)
 
             gpg --batch --quiet --decrypt "$FILE" > "$TEMP_DECRYPT" 2>/dev/null
             if [ $? -eq 0 ] && [ -s "$TEMP_DECRYPT" ]; then
-                echo -e "--- LOG DATA ACCESSED ---
-"
+                echo -e "--- LOG DATA ACCESSED ---\n"
                 cat "$TEMP_DECRYPT"
-                echo -e "
-=============================================="
+                echo -e "\n=============================================="
                 rm -f "$FILE"
 
                 while true; do
@@ -118,7 +138,6 @@ while True:
 # SUBSCRIPT B: THE ASYNCHRONOUS MULTI-CAST MAIL COMPOSER
 # ------------------------------------------------------------------------------
 run_composer() {
-    CONTACTS_FILE="$HOME/.051n7_mail/contacts.conf"
     touch "$CONTACTS_FILE"
 
     lookup_contact() {
@@ -143,7 +162,7 @@ run_composer() {
         echo "       051N7 YGGDRASIL MULTI-CAST COMPOSER    "
         echo "=============================================="
         echo " (Type 'CANCEL' to reset | Type 'PREV' to go back 1 step)"
-        echo " (Type 'CONTACTS' at 'TO' prompt to view address book)"
+        echo " (Type 'CONTACTS' or 'QUEUE' at 'TO' prompt)"
         echo "----------------------------------------------"
 
         mail_from="ghost@051n7.usr"
@@ -167,15 +186,32 @@ run_composer() {
                 1)
                     read -p "TO Handle/GPG ID [e.g. alice@051n7.usr]: " val
                     if [ "$val" = "CANCEL" ]; then continue 2; fi
-                    if [ "$val" = "PREV" ]; then printf "[1A[2K[1A[2K"; step=0; continue; fi
+                    if [ "$val" = "PREV" ]; then printf "\033[1A\033[2K\033[1A\033[2K"; step=0; continue; fi
                     if [ "$val" = "CONTACTS" ]; then
-                        echo -e "
-=== LOCAL CONTACTS ADDRESS BOOK ==="
+                        echo -e "\n=== LOCAL CONTACTS ADDRESS BOOK ==="
                         if [ -s "$CONTACTS_FILE" ]; then
-                            cat "$CONTACTS_FILE" | awk -F'|' '{printf " %-22s -> GPG: %-25s IPv6: %s
-", $1, $2, $3}'
+                            cat "$CONTACTS_FILE" | awk -F'|' '{printf " %-22s -> GPG: %-25s IPv6: %s\n", $1, $2, $3}'
                         else
                             echo " [No saved contacts yet]"
+                        fi
+                        echo "===================================="
+                        read -p "Press [Enter] to resume..." dummy
+                        continue
+                    fi
+
+                    if [ "$val" = "QUEUE" ]; then
+                        echo -e "\n=== OUTBOUND PENDING SPOOL QUEUE ==="
+                        found_queue=0
+                        for mf in "$OUTBOUND_SPOOL"/*.meta; do
+                            if [ -f "$mf" ]; then
+                                tip=$(cat "$mf" 2>/dev/null)
+                                base=$(basename "$mf" .meta)
+                                echo " [Pending] ID: $base -> Target IPv6: $tip"
+                                found_queue=1
+                            fi
+                        done
+                        if [ $found_queue -eq 0 ]; then
+                            echo " [Queue is empty - All outbound messages delivered!]"
                         fi
                         echo "===================================="
                         read -p "Press [Enter] to resume..." dummy
@@ -199,7 +235,7 @@ run_composer() {
                 2)
                     read -p "TO Destination Yggdrasil IPv6 Address  : " val
                     if [ "$val" = "CANCEL" ]; then continue 2; fi
-                    if [ "$val" = "PREV" ]; then printf "[1A[2K[1A[2K"; step=1; continue; fi
+                    if [ "$val" = "PREV" ]; then printf "\033[1A\033[2K\033[1A\033[2K"; step=1; continue; fi
                     ygg_to="$val"
 
                     if [ -n "$mail_to" ] && [ -n "$ygg_to" ]; then
@@ -219,7 +255,7 @@ run_composer() {
                     read -p "CC GPG Identities (Space-separated)    : " val
                     if [ "$val" = "CANCEL" ]; then continue 2; fi
                     if [ "$val" = "PREV" ]; then
-                        printf "[1A[2K[1A[2K"
+                        printf "\033[1A\033[2K\033[1A\033[2K"
                         if lookup_contact "$mail_to_input" >/dev/null 2>&1; then step=1; else step=2; fi
                         continue
                     fi
@@ -229,14 +265,14 @@ run_composer() {
                 4)
                     read -p "BCC GPG Identities (Space-separated)   : " val
                     if [ "$val" = "CANCEL" ]; then continue 2; fi
-                    if [ "$val" = "PREV" ]; then printf "[1A[2K[1A[2K"; step=3; continue; fi
+                    if [ "$val" = "PREV" ]; then printf "\033[1A\033[2K\033[1A\033[2K"; step=3; continue; fi
                     mail_bcc="$val"
                     step=5
                     ;;
                 5)
                     read -p "Subject Line                           : " val
                     if [ "$val" = "CANCEL" ]; then continue 2; fi
-                    if [ "$val" = "PREV" ]; then printf "[1A[2K[1A[2K"; step=4; continue; fi
+                    if [ "$val" = "PREV" ]; then printf "\033[1A\033[2K\033[1A\033[2K"; step=4; continue; fi
                     mail_subject="$val"
                     step=6
                     ;;
@@ -249,10 +285,9 @@ run_composer() {
             continue
         fi
 
-        echo -e "
-Enter email text body:"
+        echo -e "\nEnter email text body:"
         echo "  - Type 'END' on a clean line to dispatch"
-        echo "  - Type 'PREV' on a clean line to delete previous line"
+        echo "  - Type 'PREV' on a clean line to erase previous line"
         echo "  - Type 'CANCEL' on a clean line to discard composition"
         echo "----------------------------------------------------------------"
 
@@ -269,9 +304,9 @@ Enter email text body:"
                 if [ ${#body_lines[@]} -gt 0 ]; then
                     unset 'body_lines[${#body_lines[@]}-1]'
                     body_lines=("${body_lines[@]}")
-                    printf "[1A[2K[1A[2K"
+                    printf "\033[1A\033[2K\033[1A\033[2K"
                 else
-                    printf "[1A[2K"
+                    printf "\033[1A\033[2K"
                     step=5
                     break
                 fi
@@ -287,8 +322,7 @@ Enter email text body:"
 
         message_body=""
         for l in "${body_lines[@]}"; do
-            message_body+="$l"$'
-'
+            message_body+="$l"$'\n'
         done
 
         echo "----------------------------------------------------------------"
@@ -300,24 +334,19 @@ Enter email text body:"
             [ -z "$recipient" ] && continue
 
             TEMP_RAW=$(mktemp)
-            printf "Date: $(date)
-From: <$mail_from>
-To: <$mail_to>
-" > "$TEMP_RAW"
-            [ ! -z "$mail_cc" ] && printf "Cc: $mail_cc
-" >> "$TEMP_RAW"
+            printf "Date: $(date)\nFrom: <$mail_from>\nTo: <$mail_to>\n" > "$TEMP_RAW"
+            [ ! -z "$mail_cc" ] && printf "Cc: $mail_cc\n" >> "$TEMP_RAW"
 
             if echo "$mail_bcc" | grep -q "$recipient"; then
-                printf "X-Routing-Context: Anonymous Private Receipt (BCC Layer)
-" >> "$TEMP_RAW"
+                printf "X-Routing-Context: Anonymous Private Receipt (BCC Layer)\n" >> "$TEMP_RAW"
             fi
-            printf "Subject: $mail_subject
-
-$message_body" >> "$TEMP_RAW"
+            printf "Subject: $mail_subject\n\n$message_body" >> "$TEMP_RAW"
 
             TIMESTAMP=$(date +%Y%m%d_%H%M%S)
             RAND_HEX=$(cat /dev/urandom | tr -dc 'a-f0-9' | fold -w 8 | head -n 1)
             SPOOL_FILE="$OUTBOUND_SPOOL/send_${TIMESTAMP}_${RAND_HEX}.gpg"
+            SPOOL_META="$OUTBOUND_SPOOL/send_${TIMESTAMP}_${RAND_HEX}.meta"
+            echo "$ygg_to" > "$SPOOL_META"
 
             gpg --batch --yes --armor --recipient "$recipient" --output "$SPOOL_FILE" --encrypt "$TEMP_RAW" 2>/dev/null
             rm -f "$TEMP_RAW"
@@ -328,7 +357,7 @@ $message_body" >> "$TEMP_RAW"
                     nc -6 -w 5 "$ygg_to" 8525 < "$SPOOL_FILE" >/dev/null 2>&1
                     if [ $? -eq 0 ]; then
                         echo "[+] Core broadcast success."
-                        rm -f "$SPOOL_FILE"
+                        rm -f "$SPOOL_FILE" "$SPOOL_META"
                     else
                         echo "[!] Host unreachable. Packet queued in spool for background processing."
                     fi
@@ -354,33 +383,14 @@ elif [ "$1" == "--internal-composer" ]; then
 fi
 
 mkdir -p "$YGG_DIR" "$LOCAL_INBOX" "$LOCAL_ARCHIVE" "$OUTBOUND_SPOOL"
-IP_FILE="$HOME/.051n7_mail/my_ygg_ip"
-if [ ! -f "$IP_FILE" ] || [ ! -s "$IP_FILE" ]; then
-    echo "=============================================="
-    echo "       051N7 YGGDRASIL STATION SETUP          "
-    echo "=============================================="
-    read -p "[?] Enter YOUR Yggdrasil IPv6 Address (from VPN App): " user_ygg_ip
-    echo "$user_ygg_ip" > "$IP_FILE"
-fi
-IP_FILE="$HOME/.051n7_mail/my_ygg_ip"
-if [ ! -f "$IP_FILE" ] || [ ! -s "$IP_FILE" ]; then
-    echo "=============================================="
-    echo "       051N7 YGGDRASIL STATION SETUP          "
-    echo "=============================================="
-    read -p "[?] Enter YOUR Yggdrasil IPv6 Address (from VPN App): " user_ygg_ip
-    echo "$user_ygg_ip" > "$IP_FILE"
-fi
 gpg-connect-agent /bye >/dev/null 2>&1
 
-if [ ! -f "$YGG_CONF" ]; then
-    echo "[*] Generating standard cryptographic device identity keypair..."
-    yggdrasil -genconf > "$YGG_CONF" 2>/dev/null
-fi
-
-if ! pgrep -x "yggdrasil" > /dev/null; then
-    echo "[*] Initializing background network packet overlay router..."
-    sudo yggdrasil -useconffile "$YGG_CONF" > /dev/null 2>&1 &
-    sleep 2
+if [ ! -f "$IP_FILE" ] || [ ! -s "$IP_FILE" ]; then
+    echo "=============================================="
+    echo "       051N7 YGGDRASIL STATION SETUP          "
+    echo "=============================================="
+    read -p "[?] Enter YOUR Yggdrasil IPv6 Address (from VPN App): " user_ygg_ip
+    echo "$user_ygg_ip" > "$IP_FILE"
 fi
 
 tmux kill-session -t "$SESSION_NAME" 2>/dev/null
