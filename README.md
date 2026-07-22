@@ -1,7 +1,7 @@
-# 📡 051N7-MAIL: Decentralized P2P Multi-Cast Console (v4.0)
+# 📡 051N7-MAIL: Decentralized P2P Multi-Cast Console (v0.0.4)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Release](https://img.shields.io/badge/Release-v4.0.0-blue.svg)](https://github.com/7usr-0mail/051n7-mail/releases)
+[![Release](https://img.shields.io/badge/Release-v0.0.4-blue.svg)](https://github.com/7usr-0mail/051n7-mail/releases)
 [![Network](https://img.shields.io/badge/Network-Yggdrasil_IPv6-purple.svg)](https://yggdrasil-network.github.io/)
 
 **051N7-MAIL** is an asynchronous, end-to-end encrypted terminal mail console built for secure peer-to-peer communication across the **Yggdrasil IPv6 mesh network**. It combines OpenPGP cryptography, local virtual handle resolution (`@051n7.usr`), and a split-screen `tmux` interface.
@@ -30,8 +30,8 @@ Download the `.deb` installer from the [Releases](https://github.com/7usr-0mail/
 
 ```bash
 # 1. Download the latest release
-curl -LO https://github.com/7usr-0mail/051n7-mail/releases/download/v4.0.0/051n7-mail_4.0.0_all.deb
+curl -LO https://github.com/7usr-0mail/051n7-mail/releases/download/v0.0.4/051n7-mail_0.0.4_all.deb
 
 # 2. Install package and dependencies
-sudo apt install ./051n7-mail_4.0.0_all.deb
+sudo apt install ./051n7-mail_0.0.4_all.deb
 OF
