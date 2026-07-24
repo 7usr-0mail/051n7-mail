@@ -1,7 +1,7 @@
-# 📡 051N7-MAIL: Decentralized P2P Multi-Cast Console (v0.0.5)
+# 📡 051N7-MAIL: Decentralized P2P Multi-Cast Console (v0.0.6)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Release](https://img.shields.io/badge/Release-v0.0.5-blue.svg)](https://github.com/7usr-0mail/051n7-mail/releases)
+[![Release](https://img.shields.io/badge/Release-v0.0.6-blue.svg)](https://github.com/7usr-0mail/051n7-mail/releases)
 [![Network](https://img.shields.io/badge/Network-Yggdrasil_IPv6-purple.svg)](https://yggdrasil-network.github.io/)
 
 **051N7-MAIL** is an asynchronous, end-to-end encrypted terminal mail console built for secure peer-to-peer communication across the **Yggdrasil IPv6 mesh network**. It combines OpenPGP cryptography, local virtual handle resolution (`@051n7.usr`), and a split-screen `tmux` interface.
@@ -26,8 +26,13 @@ If you are using an Android phone, follow these simple steps to get started:
 1. Open the **UserLAnd app** and start a **Debian** or **Ubuntu** terminal session.
 2. Copy and paste this single command into the terminal and press **Enter**:
    ```bash
-   curl -LO https://github.com/7usr-0mail/051n7-mail/releases/download/v0.0.5/051n7-mail_0.0.5_all.deb && sudo apt update && sudo apt install -y ./051n7-mail_0.0.5_all.deb
+   curl -LO https://github.com/7usr-0mail/051n7-mail/releases/download/v0.0.6/051n7-mail_0.0.6_all.deb && sudo apt update && sudo apt install -y ./051n7-mail_0.0.6_all.deb
    ```
+
+   > **UserLAnd note:** `apt install ./<file>.deb` auto-installs the dependencies. If you
+   > install with `dpkg -i` directly instead, run it with `sudo` (dpkg needs superuser on UserLAnd).
+
+   *(Latest builds are always on the [Releases page](https://github.com/7usr-0mail/051n7-mail/releases).)*
 
 ### Phase 4: Create Your Encryption Key (One-Time Setup)
 1. Generate your GPG key instantly in UserLAnd (bypasses Android pinentry/entropy hangs):
@@ -111,7 +116,7 @@ All application data is stored locally in your home directory:
 
 ## 🤖 Acknowledgements & AI Development
 
-This project was architected, written, debugged, and packaged with the interactive pair-programming assistance of **Google Gemini (AI Assistant)**.
+This project was architected, written, debugged, and packaged with the interactive pair-programming assistance of AI assistants (**Google Gemini**, **Qwen**, and **Arena.ai Agent Mode**).
 
 ### Sourced Open-Source Projects & Libraries
 - **[Yggdrasil Network](https://yggdrasil-network.github.io/):** Fully encrypted end-to-end P2P IPv6 overlay network routing.
