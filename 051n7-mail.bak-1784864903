@@ -16,7 +16,7 @@ export TERM=xterm-256color
 
 diagnose_transmission_failure() {
     local target_ip="$1"
-    local my_ip; my_ip=$(tr -d ' \r\n' < "$IP_FILE" 2>/dev/null)
+    local my_ip=$(cat "$IP_FILE" 2>/dev/null | tr -d ' \r\n')
 
     if [ -z "$my_ip" ] || ! (ping -6 -c 1 -W 1 "$my_ip" >/dev/null 2>&1 || ping6 -c 1 -w 1 "$my_ip" >/dev/null 2>&1); then
         echo "[ERR-LOC-01] Local Yggdrasil VPN is OFF on your device."
@@ -36,7 +36,7 @@ diagnose_transmission_failure() {
 # ------------------------------------------------------------------------------
 run_receiver() {
     clear
-    MY_ASSIGNED_IP=$(tr -d ' \r\n' < "$IP_FILE" 2>/dev/null)
+    MY_ASSIGNED_IP=$(cat "$IP_FILE" 2>/dev/null | tr -d ' \r\n')
 
     check_vpn_status() {
         if [ -n "$MY_ASSIGNED_IP" ] && (ping -6 -c 1 -W 1 "$MY_ASSIGNED_IP" >/dev/null 2>&1 || ping6 -c 1 -w 1 "$MY_ASSIGNED_IP" >/dev/null 2>&1); then
@@ -93,7 +93,7 @@ while True:
                 gpg_file="${meta_file%.meta}.gpg"
                 [ -f "$gpg_file" ] || { rm -f "$meta_file"; continue; }
 
-                target_ip=$(tr -d ' \r\n' < "$meta_file" 2>/dev/null)
+                target_ip=$(cat "$meta_file" 2>/dev/null | tr -d ' \r\n')
                 if [ -n "$target_ip" ]; then
                     if nc -6 -w 3 "$target_ip" 8525 < "$gpg_file" >/dev/null 2>&1; then
                         echo -e "\n[+] QUEUE RETRY SUCCESS: Auto-delivered pending packet to [$target_ip]"
@@ -119,10 +119,11 @@ while True:
         fi
 
         FILE=$(find "$LOCAL_INBOX" -maxdepth 1 -name "*.gpg" 2>/dev/null | head -n 1)
-        if [ -n "$FILE" ]; then
+        if [ ! -z "$FILE" ]; then
             TEMP_DECRYPT=$(mktemp)
 
-            if gpg --batch --quiet --decrypt "$FILE" > "$TEMP_DECRYPT" 2>/dev/null && [ -s "$TEMP_DECRYPT" ]; then
+            gpg --batch --quiet --decrypt "$FILE" > "$TEMP_DECRYPT" 2>/dev/null
+            if [ $? -eq 0 ] && [ -s "$TEMP_DECRYPT" ]; then
                 if grep -q "PEEK Echo Loop Test" "$TEMP_DECRYPT" 2>/dev/null; then
                     echo -e "\n=============================================="
                     echo -e "[+] PEEK ECHO PONG DETECTED!"
@@ -150,7 +151,7 @@ while True:
                 rm -f "$FILE"
 
                 while true; do
-                    read -r -p "Archive message to offline storage or Delete permanently? (archive/delete): " choice
+                    read -p "Archive message to offline storage or Delete permanently? (archive/delete): " choice
                     case "$choice" in
                         [Aa]* )
                             TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -198,7 +199,7 @@ PEEKEOF
     fi
 
     get_local_gpg_key() {
-        local key; key=$(gpg --list-secret-keys --keyid-format LONG 2>/dev/null | grep -E "^sec" | awk '{print $2}' | cut -d'/' -f2 | head -n 1)
+        local key=$(gpg --list-secret-keys --keyid-format LONG 2>/dev/null | grep -E "^sec" | awk '{print $2}' | cut -d'/' -f2 | head -n 1)
         if [ -z "$key" ]; then
             key=$(gpg --list-keys --keyid-format LONG 2>/dev/null | grep -E "^pub" | awk '{print $2}' | cut -d'/' -f2 | head -n 1)
         fi
@@ -206,9 +207,9 @@ PEEKEOF
     }
 
     get_peek_ip() {
-        local peer_ip; peer_ip=$(yggdrasilctl -useconffile "$YGG_CONF" getPeers 2>/dev/null | grep -E '^(2|3)[0-9a-fA-F]{2}:' | awk '{print $1}' | head -n 1)
+        local peer_ip=$(yggdrasilctl -useconffile "$YGG_CONF" getPeers 2>/dev/null | grep -E '^(2|3)[0-9a-fA-F]{2}:' | awk '{print $1}' | head -n 1)
         if [ -z "$peer_ip" ]; then
-            peer_ip=$(tr -d ' \r\n' < "$IP_FILE" 2>/dev/null)
+            peer_ip=$(cat "$IP_FILE" 2>/dev/null | tr -d ' \r\n')
         fi
         echo "${peer_ip:-::1}"
     }
@@ -266,8 +267,8 @@ CEOF
         YGG_IPS=()
 
         if [ "$query" = "peek" ] || [ "$query" = "peek@051n7.dev" ]; then
-            GPG_KEYS+=("$(get_local_gpg_key)")
-            YGG_IPS+=("$(get_peek_ip)")
+            GPG_KEYS+=($(get_local_gpg_key))
+            YGG_IPS+=($(get_peek_ip))
             is_peek=1
             mail_to_input="peek@051n7.dev"
             return 0
@@ -303,6 +304,7 @@ CEOF
     while true; do
         mail_from="ghost@051n7.usr"
         mail_to=""
+        ygg_to=""
         mail_cc=""
         mail_bcc=""
         mail_subject=""
@@ -314,6 +316,7 @@ CEOF
 
         # TO multi-entry system
         TO_ENTRIES=()
+        to_buffer=""
 
         draw_header() {
             clear
@@ -339,7 +342,7 @@ CEOF
             draw_header
             case $step in
                 0)
-                    read -r -p "FROM Address [Default: ghost@051n7.usr]: " val
+                    read -p "FROM Address [Default: ghost@051n7.usr]: " val
                     cmd=$(echo "$val" | tr '[:lower:]' '[:upper:]')
                     [ "$cmd" = "CANCEL" ] && continue 2
                     if [ "$cmd" = "PREV" ]; then continue; fi
@@ -364,7 +367,7 @@ CEOF
                     step=1
                     ;;
                 1)
-                    read -r -p "TO Handle/GPG ID [e.g. alice, peek]: " val
+                    read -p "TO Handle/GPG ID [e.g. alice, peek]: " val
                     cmd=$(echo "$val" | tr '[:lower:]' '[:upper:]')
                     [ "$cmd" = "CANCEL" ] && continue 2
 
@@ -379,7 +382,7 @@ CEOF
                             echo "    [+] Added: $token"
                         done
                         echo ""
-                        read -r -p "Press Enter to continue with these recipients..." _dummy
+                        read -p "Press Enter to continue with these recipients..." dummy
                         # Now process all entries. lookup_contact() is the single
                         # source of truth for appending to GPG_KEYS/YGG_IPS, so we
                         # never append in the caller (that caused double-appends and
@@ -460,7 +463,7 @@ CEOF
                             echo "  (None saved)"
                         fi
                         echo "========================================================"
-                        read -r -p "Press [Enter] to resume..." _dummy
+                        read -p "Press [Enter] to resume..." dummy
                         continue
                     fi
 
@@ -484,7 +487,7 @@ CEOF
                                 done
                                 [ $matched -eq 0 ] && echo " [!] No queued message matching ID [$target_id] found."
                             else
-                                read -r -p " [?] Are you sure you want to purge ALL pending queued messages? (y/N): " confirm_purge
+                                read -p " [?] Are you sure you want to purge ALL pending queued messages? (y/N): " confirm_purge
                                 case "$confirm_purge" in
                                     [Yy]* )
                                         rm -f "$OUTBOUND_SPOOL"/*.gpg "$OUTBOUND_SPOOL"/*.meta 2>/dev/null
@@ -512,7 +515,7 @@ CEOF
                             fi
                         fi
                         echo "===================================="
-                        read -r -p "Press [Enter] to resume..." _dummy
+                        read -p "Press [Enter] to resume..." dummy
                         continue
                     fi
 
@@ -536,24 +539,24 @@ CEOF
                     fi
                     ;;
                 2)
-                    read -r -p "TO Destination Yggdrasil IPv6 Address  : " val
+                    read -p "TO Destination Yggdrasil IPv6 Address  : " val
                     cmd=$(echo "$val" | tr '[:lower:]' '[:upper:]')
                     [ "$cmd" = "CANCEL" ] && continue 2
                     if [ "$cmd" = "PREV" ]; then step=1; continue; fi
                     YGG_IPS=("$val")
 
                     if [ -n "${GPG_KEYS[0]}" ] && [ -n "${YGG_IPS[0]}" ]; then
-                        read -r -p "[?] Save recipient to local contacts directory? (y/N): " save_choice
+                        read -p "[?] Save recipient to local contacts directory? (y/N): " save_choice
                         case "$save_choice" in
                             [Yy]* )
-                                read -r -p "    Save as (1) Individual user file, (2) Group member folder? [1/2]: " type_choice
+                                read -p "    Save as (1) Individual user file, (2) Group member folder? [1/2]: " type_choice
                                 if [ "$type_choice" = "2" ]; then
-                                    read -r -p "    Group Folder Name [e.g. squad@051n7.grp]: " grp_name
-                                    read -r -p "    User File Name [e.g. alice@051n7.usr]: " mbr_name
+                                    read -p "    Group Folder Name [e.g. squad@051n7.grp]: " grp_name
+                                    read -p "    User File Name [e.g. alice@051n7.usr]: " mbr_name
                                     save_group_contact "$grp_name" "$mbr_name" "${GPG_KEYS[0]}" "${YGG_IPS[0]}"
                                 else
                                     default_handle=$(echo "${GPG_KEYS[0]}" | cut -d'@' -f1)"@051n7.usr"
-                                    read -r -p "    User File Name [Default: $default_handle]: " custom_handle
+                                    read -p "    User File Name [Default: $default_handle]: " custom_handle
                                     custom_handle=${custom_handle:-"$default_handle"}
                                     save_individual_contact "$custom_handle" "${GPG_KEYS[0]}" "${YGG_IPS[0]}"
                                 fi
@@ -563,7 +566,7 @@ CEOF
                     step=3
                     ;;
                 3)
-                    read -r -p "CC GPG Identities (Space-separated) [Optional, Enter to skip]: " val
+                    read -p "CC GPG Identities (Space-separated) [Optional, Enter to skip]: " val
                     cmd=$(echo "$val" | tr '[:lower:]' '[:upper:]')
                     [ "$cmd" = "CANCEL" ] && continue 2
                     if [ "$cmd" = "PREV" ]; then
@@ -574,7 +577,7 @@ CEOF
                     step=4
                     ;;
                 4)
-                    read -r -p "BCC GPG Identities (Space-separated) [Optional, Enter to skip]: " val
+                    read -p "BCC GPG Identities (Space-separated) [Optional, Enter to skip]: " val
                     cmd=$(echo "$val" | tr '[:lower:]' '[:upper:]')
                     [ "$cmd" = "CANCEL" ] && continue 2
                     if [ "$cmd" = "PREV" ]; then step=3; continue; fi
@@ -582,7 +585,7 @@ CEOF
                     step=5
                     ;;
                 5)
-                    read -r -p "Subject Line                           : " val
+                    read -p "Subject Line                           : " val
                     cmd=$(echo "$val" | tr '[:lower:]' '[:upper:]')
                     [ "$cmd" = "CANCEL" ] && continue 2
                     if [ "$cmd" = "PREV" ]; then step=4; continue; fi
@@ -677,7 +680,8 @@ CEOF
 
             if [ -f "$SPOOL_FILE" ]; then
                 echo "[*] Transmitting envelope to target [$recipient] @ [$target_ip]..."
-                if nc -6 -w 5 "$target_ip" 8525 < "$SPOOL_FILE" >/dev/null 2>&1; then
+                nc -6 -w 5 "$target_ip" 8525 < "$SPOOL_FILE" >/dev/null 2>&1
+                if [ $? -eq 0 ]; then
                     echo "[+] Broadcast success to [$target_ip]."
                     rm -f "$SPOOL_FILE"
                 else
@@ -689,7 +693,7 @@ CEOF
             fi
         done
         echo "=============================================="
-        read -r -p "Press [Enter] to recycle mail composer panel..." _dummy
+        read -p "Press [Enter] to recycle mail composer panel..." dummy
     done
 }
 
@@ -711,7 +715,7 @@ if [ ! -f "$IP_FILE" ] || [ ! -s "$IP_FILE" ]; then
     echo "=============================================="
     echo "       051N7 YGGDRASIL STATION SETUP          "
     echo "=============================================="
-    read -r -p "[?] Enter YOUR Yggdrasil IPv6 Address (from VPN App): " user_ygg_ip
+    read -p "[?] Enter YOUR Yggdrasil IPv6 Address (from VPN App): " user_ygg_ip
     echo "$user_ygg_ip" > "$IP_FILE"
 fi
 
