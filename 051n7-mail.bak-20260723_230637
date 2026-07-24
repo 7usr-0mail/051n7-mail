@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# 051N7-MAIL: PRODUCTION DECENTRALIZED P2P MULTI-CAST CONSOLE (v0.0.6 BUILD)
+# 051N7-MAIL: PRODUCTION DECENTRALIZED P2P MULTI-CAST CONSOLE (v0.0.5 BUILD)
 # ==============================================================================
 
 YGG_DIR="$HOME/.051n7_ygg"
@@ -13,23 +13,6 @@ IP_FILE="$HOME/.051n7_mail/my_ygg_ip"
 SESSION_NAME="051n7_secure_station"
 
 export TERM=xterm-256color
-
-diagnose_transmission_failure() {
-    local target_ip="$1"
-    local my_ip=$(cat "$IP_FILE" 2>/dev/null | tr -d ' \r\n')
-
-    if [ -z "$my_ip" ] || ! (ping -6 -c 1 -W 1 "$my_ip" >/dev/null 2>&1 || ping6 -c 1 -w 1 "$my_ip" >/dev/null 2>&1); then
-        echo "[ERR-LOC-01] Local Yggdrasil VPN is OFF on your device."
-        return
-    fi
-
-    if ! (ping -6 -c 1 -W 2 "$target_ip" >/dev/null 2>&1 || ping6 -c 1 -w 2 "$target_ip" >/dev/null 2>&1); then
-        echo "[ERR-NET-02] No Yggdrasil mesh route to peer [$target_ip]."
-        return
-    fi
-
-    echo "[ERR-RCV-03] Peer [$target_ip] reached, but port 8525 is closed (Recipient monitor offline)."
-}
 
 # ------------------------------------------------------------------------------
 # SUBSCRIPT A: THE RECEIVER, VPN MONITOR & QUEUE RETRY WORKER
@@ -51,16 +34,6 @@ run_receiver() {
     echo "[*] 051n7 Secure Inbound Yggdrasil Monitor Active."
     echo "[*] YOUR TARGET ADDR: $LAST_STATUS"
     echo "[*] Listening on port 8525 for encrypted payloads..."
-    if [ -z "$MY_ASSIGNED_IP" ] || ! (ping -6 -c 1 -W 1 "$MY_ASSIGNED_IP" >/dev/null 2>&1 || ping6 -c 1 -w 1 "$MY_ASSIGNED_IP" >/dev/null 2>&1); then
-        echo "[!] Yggdrasil VPN OFFLINE - Listener disabled for security"
-        echo "[*] Start VPN and restart 0mail to receive messages"
-    else
-        echo "[V] Yggdrasil VPN ONLINE - Secure listener active"
-    fi
-    MY_KEY_ID=$(cat "$HOME/.051n7_mail/config/gpg_key_id" 2>/dev/null)
-    if [ -n "$MY_KEY_ID" ]; then
-        echo "[*] YOUR GPG KEY ID: $MY_KEY_ID"
-    fi
     echo "[*] Outbound Spool Auto-Retry Queue Active."
     echo "----------------------------------------------------------------"
 
@@ -69,7 +42,7 @@ import socket, sys, os, time, random
 inbox = sys.argv[1]
 s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-s.bind((sys.argv[2], 8525))
+s.bind(("::", 8525))
 s.listen(5)
 while True:
     conn, addr = s.accept()
@@ -83,7 +56,7 @@ while True:
         fname = os.path.join(inbox, f"recv_{int(time.time())}_{random.randint(1000,9999)}.gpg")
         with open(fname, "wb") as f:
             f.write(data)
-' "\$LOCAL_INBOX" "\$MY_ASSIGNED_IP" >/dev/null 2>&1 &
+' "$LOCAL_INBOX" >/dev/null 2>&1 &
     PYTHON_LISTEN_PID=$!
 
     run_spool_retry() {
@@ -120,34 +93,16 @@ while True:
 
         FILE=$(find "$LOCAL_INBOX" -maxdepth 1 -name "*.gpg" 2>/dev/null | head -n 1)
         if [ ! -z "$FILE" ]; then
+            echo -e "\n=============================================="
+            echo -e "[+] INCOMING ENCRYPTED EMAIL PACKET DETECTED"
+            echo -e "==============================================\n"
             TEMP_DECRYPT=$(mktemp)
 
             gpg --batch --quiet --decrypt "$FILE" > "$TEMP_DECRYPT" 2>/dev/null
             if [ $? -eq 0 ] && [ -s "$TEMP_DECRYPT" ]; then
-                if grep -q "PEEK Echo Loop Test" "$TEMP_DECRYPT" 2>/dev/null; then
-                    echo -e "\n=============================================="
-                    echo -e "[+] PEEK ECHO PONG DETECTED!"
-                    echo -e "=============================================="
-
-                    p_from=$(grep -m 1 "^To: " "$TEMP_DECRYPT" | sed 's/To: <\(.*\)>/FROM \1/' | sed 's/To: \(.*\)/FROM \1/')
-                    p_to=$(grep -m 1 "^From: " "$TEMP_DECRYPT" | sed 's/From: <\(.*\)>/TO \1/' | sed 's/From: \(.*\)/TO \1/')
-                    p_subj=$(grep -m 1 "^Subject: " "$TEMP_DECRYPT" | sed 's/Subject: /SUBJECT /')
-
-                    echo "${p_from:-FROM peek@051n7.dev}"
-                    echo "${p_to:-TO ghost@051n7.usr}"
-                    echo "${p_subj:-SUBJECT Test Message}"
-                    echo "BODY"
-                    sed -e '1,/^$/d' "$TEMP_DECRYPT"
-                    echo -e "==============================================\n"
-                else
-                    echo -e "\n=============================================="
-                    echo -e "[+] INCOMING ENCRYPTED EMAIL PACKET DETECTED"
-                    echo -e "==============================================\n"
-                    echo -e "--- LOG DATA ACCESSED ---\n"
-                    cat "$TEMP_DECRYPT"
-                    echo -e "\n=============================================="
-                fi
-
+                echo -e "--- LOG DATA ACCESSED ---\n"
+                cat "$TEMP_DECRYPT"
+                echo -e "\n=============================================="
                 rm -f "$FILE"
 
                 while true; do
@@ -182,47 +137,13 @@ while True:
 run_composer() {
     mkdir -p "$CONTACTS_DIR"
 
-    DEV_CONTACT="$CONTACTS_DIR/0mail@051n7.dev"
-    if [ ! -f "$DEV_CONTACT" ]; then
-        cat << 'DEVEOF' > "$DEV_CONTACT"
-GPG_ID=7usr-0mail
-YGG_IP=204:14f2:cdc5:64b1:7c8f:caf:c80a:539e
-DEVEOF
-    fi
-
-    PEEK_CONTACT="$CONTACTS_DIR/peek@051n7.dev"
-    if [ ! -f "$PEEK_CONTACT" ]; then
-        cat << 'PEEKEOF' > "$PEEK_CONTACT"
-GPG_ID=PEEK_SELF_KEY
-YGG_IP=PEEK_AUTO_FETCH
-PEEKEOF
-    fi
-
-    get_local_gpg_key() {
-        local key=$(gpg --list-secret-keys --keyid-format LONG 2>/dev/null | grep -E "^sec" | awk '{print $2}' | cut -d'/' -f2 | head -n 1)
-        if [ -z "$key" ]; then
-            key=$(gpg --list-keys --keyid-format LONG 2>/dev/null | grep -E "^pub" | awk '{print $2}' | cut -d'/' -f2 | head -n 1)
-        fi
-        echo "${key:-ghost@051n7.usr}"
-    }
-
-    get_peek_ip() {
-        local peer_ip=$(yggdrasilctl -useconffile "$YGG_CONF" getPeers 2>/dev/null | grep -E '^(2|3)[0-9a-fA-F]{2}:' | awk '{print $1}' | head -n 1)
-        if [ -z "$peer_ip" ]; then
-            peer_ip=$(cat "$IP_FILE" 2>/dev/null | tr -d ' \r\n')
-        fi
-        echo "${peer_ip:-::1}"
-    }
-
     save_individual_contact() {
         local handle="$1"
         local gpg_id="$2"
         local ygg_ip="$3"
         local parent_dir="${4:-$CONTACTS_DIR}"
 
-        if [[ "$handle" != *@051n7.usr ]] && [[ "$handle" != *@051n7.grp ]] && [[ "$handle" != *@051n7.dev ]]; then
-            handle="${handle}@051n7.usr"
-        fi
+        [[ "$handle" != *@051n7.usr ]] && handle="${handle}@051n7.usr"
         mkdir -p "$parent_dir"
 
         cat << CEOF > "$parent_dir/$handle"
@@ -244,59 +165,48 @@ CEOF
         save_individual_contact "$member_handle" "$gpg_id" "$ygg_ip" "$grp_dir"
     }
 
-    # --- SAFE CONTACT READER (replaces `source` to prevent code execution) ---
-    _051n7_read_contact() {
-        local _f="$1"
-        GPG_ID=""; YGG_IP=""
-        [ -f "$_f" ] || return 1
-        local _line
-        while IFS= read -r _line || [ -n "$_line" ]; do
-            case "$_line" in
-                GPG_ID=*) GPG_ID="${_line#GPG_ID=}" ;;
-                YGG_IP=*) YGG_IP="${_line#YGG_IP=}" ;;
-            esac
-        done < "$_f"
-        GPG_ID="${GPG_ID%\"}"; GPG_ID="${GPG_ID#\"}"; GPG_ID="${GPG_ID//$'\r'/}"
-        YGG_IP="${YGG_IP%\"}"; YGG_IP="${YGG_IP#\"}"; YGG_IP="${YGG_IP//$'\r'/}"
-        return 0
-    }
-
     lookup_contact() {
         local query="$1"
         GPG_KEYS=()
         YGG_IPS=()
 
-        if [ "$query" = "peek" ] || [ "$query" = "peek@051n7.dev" ]; then
-            GPG_KEYS+=($(get_local_gpg_key))
-            YGG_IPS+=($(get_peek_ip))
-            is_peek=1
-            mail_to_input="peek@051n7.dev"
+        if [ -f "$CONTACTS_DIR/$query" ]; then
+            unset GPG_ID YGG_IP
+            source "$CONTACTS_DIR/$query"
+            GPG_KEYS+=("$GPG_ID")
+            YGG_IPS+=("$YGG_IP")
             return 0
         fi
 
-        for ext in "" "@051n7.dev" "@051n7.usr" "@051n7.grp"; do
-            target_path="$CONTACTS_DIR/${query}${ext}"
-            if [ -f "$target_path" ]; then
+        if [ -d "$CONTACTS_DIR/$query" ]; then
+            for mf in "$CONTACTS_DIR/$query"/*.usr; do
+                [ -f "$mf" ] || continue
                 unset GPG_ID YGG_IP
-                _051n7_read_contact "$target_path"
-                GPG_KEYS+=("$GPG_ID")
-                YGG_IPS+=("$YGG_IP")
-                mail_to_input="$(basename "$target_path")"
-                return 0
-            elif [ -d "$target_path" ]; then
-                for mf in "$target_path"/*; do
-                    [ -f "$mf" ] || continue
-                    unset GPG_ID YGG_IP
-                    _051n7_read_contact "$mf"
-                    [ -n "$GPG_ID" ] && GPG_KEYS+=("$GPG_ID")
-                    [ -n "$YGG_IP" ] && YGG_IPS+=("$YGG_IP")
-                done
-                if [ ${#GPG_KEYS[@]} -gt 0 ]; then
-                    mail_to_input="$(basename "$target_path")"
-                    return 0
-                fi
-            fi
-        done
+                source "$mf"
+                [ -n "$GPG_ID" ] && GPG_KEYS+=("$GPG_ID")
+                [ -n "$YGG_IP" ] && YGG_IPS+=("$YGG_IP")
+            done
+            [ ${#GPG_KEYS[@]} -gt 0 ] && return 0
+        fi
+
+        if [ -f "$CONTACTS_DIR/${query}@051n7.usr" ]; then
+            unset GPG_ID YGG_IP
+            source "$CONTACTS_DIR/${query}@051n7.usr"
+            GPG_KEYS+=("$GPG_ID")
+            YGG_IPS+=("$YGG_IP")
+            return 0
+        fi
+
+        if [ -d "$CONTACTS_DIR/${query}@051n7.grp" ]; then
+            for mf in "$CONTACTS_DIR/${query}@051n7.grp"/*.usr; do
+                [ -f "$mf" ] || continue
+                unset GPG_ID YGG_IP
+                source "$mf"
+                [ -n "$GPG_ID" ] && GPG_KEYS+=("$GPG_ID")
+                [ -n "$YGG_IP" ] && YGG_IPS+=("$YGG_IP")
+            done
+            [ ${#GPG_KEYS[@]} -gt 0 ] && return 0
+        fi
 
         return 1
     }
@@ -311,12 +221,7 @@ CEOF
         mail_to_input=""
         GPG_KEYS=()
         YGG_IPS=()
-        is_peek=0
         declare -a body_lines=()
-
-        # TO multi-entry system
-        TO_ENTRIES=()
-        to_buffer=""
 
         draw_header() {
             clear
@@ -346,117 +251,46 @@ CEOF
                     cmd=$(echo "$val" | tr '[:lower:]' '[:upper:]')
                     [ "$cmd" = "CANCEL" ] && continue 2
                     if [ "$cmd" = "PREV" ]; then continue; fi
-
+                    
                     mail_from=${val:-"ghost@051n7.usr"}
-
-                    # --- FROM validation v2: ONLY @051n7.usr / @051n7.grp accepted ---
-                    _051n7_handle="${mail_from%%@*}"
-                    if [ "$_051n7_handle" = "0mail" ] || [ "$_051n7_handle" = "peek" ]; then
-                        echo -e "\n[!] Security Error: '0mail' and 'peek' are reserved system handles!"
-                        sleep 2; continue
-                    fi
-                    if [[ "$mail_from" == *@* ]]; then
-                        _051n7_domain="${mail_from#*@}"
-                        if [ "$_051n7_domain" != "051n7.usr" ] && [ "$_051n7_domain" != "051n7.grp" ]; then
-                            echo -e "\n[!] Security Error: FROM must be <name>@051n7.usr or <name>@051n7.grp (got: $mail_from)"
-                            sleep 2; continue
-                        fi
-                    else
+                    if [ "$mail_from" != "ghost@051n7.usr" ] && [[ "$mail_from" != *@051n7.usr ]] && [[ "$mail_from" != *@051n7.grp ]]; then
                         mail_from="${mail_from}@051n7.usr"
                     fi
                     step=1
                     ;;
                 1)
-                    read -p "TO Handle/GPG ID [e.g. alice, peek]: " val
+                    read -p "TO Handle/GPG ID [e.g. alice@051n7.usr]: " val
                     cmd=$(echo "$val" | tr '[:lower:]' '[:upper:]')
                     [ "$cmd" = "CANCEL" ] && continue 2
-
-                    # Split by spaces for multi-entry support
-                    if [[ "$val" == *" "* ]]; then
-                        # Multiple entries detected
-                        IFS=' ' read -ra TO_TOKENS <<< "$val"
-                        echo "[*] Processing ${#TO_TOKENS[@]} entries..."
-                        for token in "${TO_TOKENS[@]}"; do
-                            [ -z "$token" ] && continue
-                            TO_ENTRIES+=("$token")
-                            echo "    [+] Added: $token"
-                        done
-                        echo ""
-                        read -p "Press Enter to continue with these recipients..." dummy
-                        # Now process all entries. lookup_contact() is the single
-                        # source of truth for appending to GPG_KEYS/YGG_IPS, so we
-                        # never append in the caller (that caused double-appends and
-                        # desynced the two arrays). Unresolved handles prompt for an IP
-                        # so every key always has a matching IP (1:1 pairing).
-                        for token in "${TO_TOKENS[@]}"; do
-                            [ -z "$token" ] && continue
-                            val="$token"
-                            cmd=$(echo "$val" | tr '[:lower:]' '[:upper:]')
-                            # Skip special commands for batch processing
-                            [[ "$cmd" == "CONTACTS" || "$cmd" == "QUEUE"* ]] && continue
-
-                            if lookup_contact "$val"; then
-                                : # lookup_contact already appended key + ip
-                            else
-                                if [[ "$val" != *@* ]]; then
-                                    val="${val}@051n7.usr"
-                                fi
-                                read -r -p "    [?] Yggdrasil IPv6 for new recipient [$val]: " new_ip
-                                new_ip=$(echo "$new_ip" | tr -d ' \r\n')
-                                if [ -z "$new_ip" ]; then
-                                    echo "    [!] No IP given for [$val] - skipping this recipient."
-                                    continue
-                                fi
-                                GPG_KEYS+=("$val")
-                                YGG_IPS+=("$new_ip")
-                            fi
-                        done
-                        # Sanity: arrays must stay paired 1:1
-                        if [ ${#GPG_KEYS[@]} -ne ${#YGG_IPS[@]} ]; then
-                            echo "[!] Internal error: recipient/IP count mismatch (${#GPG_KEYS[@]} vs ${#YGG_IPS[@]}). Resetting."
-                            sleep 2
-                            continue 2
-                        fi
-                        if [ ${#GPG_KEYS[@]} -gt 0 ]; then
-                            step=3
-                            continue
-                        fi
-                    fi
-                    if [ "$cmd" = "PREV" ]; then
-                        # If TO_ENTRIES has entries, delete last one
-                        if [ ${#TO_ENTRIES[@]} -gt 0 ]; then
-                            unset 'TO_ENTRIES[-1]'
-                            echo "[*] Removed last TO entry. Remaining: ${#TO_ENTRIES[@]}"
-                            continue
-                        else
-                            step=0
-                            continue
-                        fi
-                    fi
+                    if [ "$cmd" = "PREV" ]; then step=0; continue; fi
                     if [ "$cmd" = "CONTACTS" ]; then
-                        echo -e "\n=== LOCAL CONTACTS DIRECTORY ($CONTACTS_DIR) ==="
+                        echo -e "
+=== LOCAL CONTACTS DIRECTORY ($CONTACTS_DIR) ==="
                         shopt -s nullglob
-                        usr_files=("$CONTACTS_DIR"/*.usr "$CONTACTS_DIR"/*.dev)
+                        usr_files=("$CONTACTS_DIR"/*.usr)
                         grp_dirs=("$CONTACTS_DIR"/*.grp)
-                        echo "[INDIVIDUAL / DEVELOPER CONTACTS]"
+                        echo "[INDIVIDUAL USERS]"
                         if [ ${#usr_files[@]} -gt 0 ]; then
                             for uf in "${usr_files[@]}"; do
                                 unset GPG_ID YGG_IP
-                                _051n7_read_contact "$uf"
-                                printf "  - %-22s -> GPG: %-22s IPv6: %s\n" "$(basename "$uf")" "$GPG_ID" "$YGG_IP"
+                                source "$uf" 2>/dev/null
+                                printf "  - %-22s -> GPG: %-22s IPv6: %s
+" "$(basename "$uf")" "$GPG_ID" "$YGG_IP"
                             done
                         else
                             echo "  (None saved)"
                         fi
-                        echo -e "\n[GROUPS (.grp Directory)]"
+                        echo -e "
+[GROUPS (.grp Directory)]"
                         if [ ${#grp_dirs[@]} -gt 0 ]; then
                             for gd in "${grp_dirs[@]}"; do
-                                mfiles=("$gd"/*)
+                                mfiles=("$gd"/*.usr)
                                 echo "  - $(basename "$gd")/ (${#mfiles[@]} members):"
                                 for mf in "${mfiles[@]}"; do
                                     unset GPG_ID YGG_IP
-                                    _051n7_read_contact "$mf" 2>/dev/null
-                                    printf "      * %-20s -> GPG: %-20s IPv6: %s\n" "$(basename "$mf")" "$GPG_ID" "$YGG_IP"
+                                    source "$mf" 2>/dev/null
+                                    printf "      * %-20s -> GPG: %-20s IPv6: %s
+" "$(basename "$mf")" "$GPG_ID" "$YGG_IP"
                                 done
                             done
                         else
@@ -467,74 +301,38 @@ CEOF
                         continue
                     fi
 
-                    if [[ "$cmd" == QUEUE* ]]; then
-                        echo -e "\n=== OUTBOUND PENDING SPOOL QUEUE ==="
-                        shopt -s nullglob
-                        meta_files=("$OUTBOUND_SPOOL"/*.meta)
-
-                        if [[ "$cmd" == "QUEUE CLEAR"* ]]; then
-                            target_id=$(echo "$val" | awk '{print $3}')
-                            if [ -n "$target_id" ]; then
-                                matched=0
-                                for mf in "${meta_files[@]}"; do
-                                    base=$(basename "$mf" .meta)
-                                    if [ "$base" = "$target_id" ] || [ "${base#send_}" = "$target_id" ]; then
-                                        rm -f "$mf" "${mf%.meta}.gpg"
-                                        echo " [+] Successfully removed queued message [$base]!"
-                                        matched=1
-                                        break
-                                    fi
-                                done
-                                [ $matched -eq 0 ] && echo " [!] No queued message matching ID [$target_id] found."
-                            else
-                                read -p " [?] Are you sure you want to purge ALL pending queued messages? (y/N): " confirm_purge
-                                case "$confirm_purge" in
-                                    [Yy]* )
-                                        rm -f "$OUTBOUND_SPOOL"/*.gpg "$OUTBOUND_SPOOL"/*.meta 2>/dev/null
-                                        echo " [+] Successfully purged all outbound messages from queue!"
-                                        ;;
-                                    * )
-                                        echo " [*] Queue purge cancelled."
-                                        ;;
-                                esac
+                    if [ "$cmd" = "QUEUE" ]; then
+                        echo -e "
+=== OUTBOUND PENDING SPOOL QUEUE ==="
+                        found_queue=0
+                        for mf in "$OUTBOUND_SPOOL"/*.meta; do
+                            if [ -f "$mf" ]; then
+                                tip=$(cat "$mf" 2>/dev/null)
+                                base=$(basename "$mf" .meta)
+                                echo " [Pending] ID: $base -> Target IPv6: $tip"
+                                found_queue=1
                             fi
-                        else
-                            if [ ${#meta_files[@]} -gt 0 ]; then
-                                idx=1
-                                for mf in "${meta_files[@]}"; do
-                                    tip=$(cat "$mf" 2>/dev/null)
-                                    base=$(basename "$mf" .meta)
-                                    echo " [$idx] ID: $base -> Target IPv6: $tip"
-                                    echo "     Diagnostic: $(diagnose_transmission_failure "$tip")"
-                                    idx=$((idx+1))
-                                done
-                                echo -e "\n (Tip: Type 'QUEUE CLEAR <ID>' to remove a specific message)"
-                                echo " (Tip: Type 'QUEUE CLEAR' to purge all messages)"
-                            else
-                                echo " [Queue is empty - All outbound messages delivered!]"
-                            fi
+                        done
+                        if [ $found_queue -eq 0 ]; then
+                            echo " [Queue is empty - All outbound messages delivered!]"
                         fi
                         echo "===================================="
                         read -p "Press [Enter] to resume..." dummy
                         continue
                     fi
 
-                    # Resolve the TO entry
+                    if [[ "$val" != *@* ]] && [[ "$val" != *@051n7.usr ]] && [[ "$val" != *@051n7.grp ]]; then
+                        val="${val}@051n7.usr"
+                    fi
+
+                    mail_to_input="$val"
                     if lookup_contact "$val"; then
                         resolved_by_contact=1
-                        # Add to TO_ENTRIES for multi-entry support
-                        TO_ENTRIES+=("$mail_to_input")
                         step=3
                     else
                         resolved_by_contact=0
-                        if [[ "$val" != *@* ]]; then
-                            val="${val}@051n7.usr"
-                        fi
-                        mail_to_input="$val"
                         mail_to="$val"
                         GPG_KEYS=("$mail_to")
-                        # Add to TO_ENTRIES for multi-entry support
-                        TO_ENTRIES+=("$val")
                         step=2
                     fi
                     ;;
@@ -647,7 +445,8 @@ CEOF
 
         message_body=""
         for l in "${body_lines[@]}"; do
-            message_body+="$l"$'\n'
+            message_body+="$l"$'
+'
         done
 
         echo "----------------------------------------------------------------"
@@ -659,21 +458,21 @@ CEOF
             [ -z "$recipient" ] || [ -z "$target_ip" ] && continue
 
             TEMP_RAW=$(mktemp)
+            printf "Date: $(date)
+From: <$mail_from>
+To: <${GPG_KEYS[0]}>
+" > "$TEMP_RAW"
+            [ ! -z "$mail_cc" ] && printf "Cc: $mail_cc
+" >> "$TEMP_RAW"
+            printf "Subject: $mail_subject
 
-            if [ $is_peek -eq 1 ]; then
-                printf 'Date: %s\nFrom: <peek@051n7.dev>\nTo: <%s>\n' "$(date)" "$mail_from" > "$TEMP_RAW"
-                printf 'X-Routing-Context: PEEK Echo Loop Test\n' >> "$TEMP_RAW"
-                printf 'Subject: %s\n\n%s' "$mail_subject" "$message_body" >> "$TEMP_RAW"
-            else
-                printf 'Date: %s\nFrom: <%s>\nTo: <%s>\n' "$(date)" "$mail_from" "$recipient" > "$TEMP_RAW"
-                [ -n "$mail_cc" ] && printf 'Cc: %s\n' "$mail_cc" >> "$TEMP_RAW"
-                printf 'Subject: %s\n\n%s' "$mail_subject" "$message_body" >> "$TEMP_RAW"
-            fi
+$message_body" >> "$TEMP_RAW"
 
             TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-            RAND_HEX=$(python3 -c 'import secrets; print(secrets.token_hex(4))')
+            RAND_HEX=$(cat /dev/urandom | tr -dc 'a-f0-9' | fold -w 8 | head -n 1)
             SPOOL_FILE="$OUTBOUND_SPOOL/send_${TIMESTAMP}_${RAND_HEX}.gpg"
             SPOOL_META="$OUTBOUND_SPOOL/send_${TIMESTAMP}_${RAND_HEX}.meta"
+            echo "$target_ip" > "$SPOOL_META"
 
             gpg --batch --yes --armor --recipient "$recipient" --output "$SPOOL_FILE" --encrypt "$TEMP_RAW" 2>/dev/null
             rm -f "$TEMP_RAW"
@@ -683,12 +482,9 @@ CEOF
                 nc -6 -w 5 "$target_ip" 8525 < "$SPOOL_FILE" >/dev/null 2>&1
                 if [ $? -eq 0 ]; then
                     echo "[+] Broadcast success to [$target_ip]."
-                    rm -f "$SPOOL_FILE"
+                    rm -f "$SPOOL_FILE" "$SPOOL_META"
                 else
-                    echo "$target_ip" > "$SPOOL_META"
-                    echo "[!] Transmission Failed:"
-                    echo "    $(diagnose_transmission_failure "$target_ip")"
-                    echo "[*] Packet safely queued in spool for background processing."
+                    echo "[!] Host unreachable. Packet queued in spool for background processing."
                 fi
             fi
         done
